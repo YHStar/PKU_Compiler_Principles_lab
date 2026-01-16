@@ -1,6 +1,8 @@
 %code requires {
   #include <memory>
   #include <string>
+  #include <utility>
+  #include <vector>
   #include "include/ast.hpp"
 }
 
@@ -9,6 +11,8 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 #include "include/ast.hpp"
 
 // 声明 lexer 函数和错误处理函数
@@ -33,18 +37,45 @@ using namespace std;
   std::string *str_val;
   int int_val;
   BaseAST *ast_val;
+  ExprAST *expr_val;
+  std::vector<BaseAST *> *ast_list;
+  std::vector<VarDef> *var_defs;
+  std::vector<ConstDef> *const_defs;
+  VarDef *var_def;
+  ConstDef *const_def;
+  std::vector<FuncDefAST::Param> *func_params;
+  FuncDefAST::Param *func_param;
+  std::vector<ExprAST *> *expr_list;
+  std::vector<InitValAST *> *init_list;
+  InitValAST *init_val;
 }
 
 // lexer 返回的所有 token 种类的声明
 // 注意 IDENT 和 INT_CONST 会返回 token 的值, 分别对应 str_val 和 int_val
-%token INT RETURN
+%token INT VOID RETURN CONST IF ELSE WHILE BREAK CONTINUE
 %token <str_val> IDENT
 %token <int_val> INT_CONST
+%token AND OR EQ NE LE GE
+
+%nonassoc LOWER_THAN_ELSE
+%nonassoc ELSE
 
 // 非终结符的类型定义
 // %type <str_val> FuncDef FuncType Block Stmt Number
-%type <ast_val> CompUnit FuncDef FuncType Block Stmt
-%type <int_val> Number
+%type <ast_val> CompUnit CompUnitItem FuncDef Block BlockItem Decl ConstDecl VarDecl Stmt
+%type <expr_val> Exp LOrExp LAndExp EqExp RelExp AddExp MulExp UnaryExp PrimaryExp LVal ConstExp
+%type <expr_val> Number
+%type <str_val> UnaryOp
+%type <ast_list> CompUnitItemList CompUnitItemListOpt BlockItemList BlockItemListOpt
+%type <var_defs> VarDefList
+%type <const_defs> ConstDefList
+%type <var_def> VarDef
+%type <const_def> ConstDef
+%type <func_params> FuncFParams FuncFParamsOpt
+%type <func_param> FuncFParam
+%type <expr_list> FuncRParams FuncRParamsOpt ArrayDimList ArrayDimListOpt ArrayIndexList ArrayIndexListOpt
+%type <init_list> InitValList InitValListOpt
+%type <init_val> InitVal
 
 %%
 
@@ -54,11 +85,40 @@ using namespace std;
 // 此时我们应该把 FuncDef 返回的结果收集起来, 作为 AST 传给调用 parser 的函数
 // $1 指代规则里第一个符号的返回值, 也就是 FuncDef 的返回值
 CompUnit
-  : FuncDef {
+  : CompUnitItemListOpt {
     auto comp_unit = make_unique<CompUnitAST>();
-    comp_unit->func_def = unique_ptr<BaseAST>($1);
+    for (auto *item : *$1) {
+      comp_unit->items.emplace_back(item);
+    }
+    delete $1;
     ast = std::move(comp_unit);
   }
+  ;
+
+CompUnitItemListOpt
+  : %empty {
+    $$ = new std::vector<BaseAST *>();
+  }
+  | CompUnitItemList {
+    $$ = $1;
+  }
+  ;
+
+CompUnitItemList
+  : CompUnitItem {
+    auto vec = new std::vector<BaseAST *>();
+    vec->push_back($1);
+    $$ = vec;
+  }
+  | CompUnitItemList CompUnitItem {
+    $1->push_back($2);
+    $$ = $1;
+  }
+  ;
+
+CompUnitItem
+  : Decl { $$ = $1; }
+  | FuncDef { $$ = $1; }
   ;
 
 // FuncDef ::= FuncType IDENT '(' ')' Block;
@@ -72,42 +132,520 @@ CompUnit
 // 虽然此处你看不出用 unique_ptr 和手动 delete 的区别, 但当我们定义了 AST 之后
 // 这种写法会省下很多内存管理的负担
 FuncDef
-  : FuncType IDENT '(' ')' Block {
-    auto ast = new FuncDefAST();
-    ast->func_type = unique_ptr<BaseAST>($1);
-    ast->ident = *unique_ptr<string>($2);
-    ast->block = unique_ptr<BaseAST>($5);
-    $$ = ast;
+  : INT IDENT '(' FuncFParamsOpt ')' Block {
+    auto node = new FuncDefAST();
+    auto type = new FuncTypeAST();
+    type->type = "int";
+    node->func_type = unique_ptr<BaseAST>(type);
+    node->ident = *unique_ptr<string>($2);
+    node->params = std::move(*$4);
+    delete $4;
+    node->block = unique_ptr<BaseAST>($6);
+    $$ = node;
+  }
+  | VOID IDENT '(' FuncFParamsOpt ')' Block {
+    auto node = new FuncDefAST();
+    auto type = new FuncTypeAST();
+    type->type = "void";
+    node->func_type = unique_ptr<BaseAST>(type);
+    node->ident = *unique_ptr<string>($2);
+    node->params = std::move(*$4);
+    delete $4;
+    node->block = unique_ptr<BaseAST>($6);
+    $$ = node;
   }
   ;
 
-// 同上, 不再解释
-FuncType
-  : INT {
-    auto node = new FuncTypeAST();
-    node->type = "int";
-    $$ = node;
+FuncFParamsOpt
+  : %empty {
+    $$ = new std::vector<FuncDefAST::Param>();
+  }
+  | FuncFParams {
+    $$ = $1;
+  }
+  ;
+
+FuncFParams
+  : FuncFParam {
+    auto vec = new std::vector<FuncDefAST::Param>();
+    vec->push_back(std::move(*$1));
+    delete $1;
+    $$ = vec;
+  }
+  | FuncFParams ',' FuncFParam {
+    $1->push_back(std::move(*$3));
+    delete $3;
+    $$ = $1;
+  }
+  ;
+
+FuncFParam
+  : INT IDENT {
+    auto param = new FuncDefAST::Param();
+    param->ident = *unique_ptr<string>($2);
+    $$ = param;
+  }
+  | INT IDENT '[' ']' ArrayDimListOpt {
+    auto param = new FuncDefAST::Param();
+    param->ident = *unique_ptr<string>($2);
+    param->is_array = true;
+    for (auto *dim : *$5) {
+      param->dims.emplace_back(dim);
+    }
+    delete $5;
+    $$ = param;
+  }
+  ;
+
+ArrayDimListOpt
+  : %empty {
+    $$ = new std::vector<ExprAST *>();
+  }
+  | ArrayDimList {
+    $$ = $1;
+  }
+  ;
+
+ArrayDimList
+  : ArrayDimList '[' ConstExp ']' {
+    $1->push_back($3);
+    $$ = $1;
+  }
+  | '[' ConstExp ']' {
+    auto vec = new std::vector<ExprAST *>();
+    vec->push_back($2);
+    $$ = vec;
   }
   ;
 
 Block
-  : '{' Stmt '}' {
+  : '{' BlockItemListOpt '}' {
     auto node = new BlockAST();
-    node->stmt = std::unique_ptr<BaseAST>($2);
+    for (auto *item : *$2) {
+      node->items.emplace_back(item);
+    }
+    delete $2;
     $$ = node;
   }
   ;
 
-Stmt
-  : RETURN Number ';' {
-    auto node = new StmtAST();
-    node->number = $2;
+BlockItemListOpt
+  : %empty {
+    $$ = new std::vector<BaseAST *>();
+  }
+  | BlockItemList {
+    $$ = $1;
+  }
+  ;
+
+BlockItemList
+  : BlockItem {
+    auto vec = new std::vector<BaseAST *>();
+    vec->push_back($1);
+    $$ = vec;
+  }
+  | BlockItemList BlockItem {
+    $1->push_back($2);
+    $$ = $1;
+  }
+  ;
+
+BlockItem
+  : Decl { $$ = $1; }
+  | Stmt { $$ = $1; }
+  ;
+
+Decl
+  : ConstDecl { $$ = $1; }
+  | VarDecl { $$ = $1; }
+  ;
+
+ConstDecl
+  : CONST INT ConstDefList ';' {
+    auto node = new ConstDeclAST();
+    node->defs = std::move(*$3);
+    delete $3;
     $$ = node;
+  }
+  ;
+
+ConstDefList
+  : ConstDefList ',' ConstDef {
+    $1->push_back(std::move(*$3));
+    delete $3;
+    $$ = $1;
+  }
+  | ConstDef {
+    auto vec = new std::vector<ConstDef>();
+    vec->push_back(std::move(*$1));
+    delete $1;
+    $$ = vec;
+  }
+  ;
+
+ConstDef
+  : IDENT ArrayDimListOpt '=' InitVal {
+    auto def = new ConstDef();
+    def->ident = *unique_ptr<string>($1);
+    for (auto *dim : *$2) {
+      def->dims.emplace_back(dim);
+    }
+    delete $2;
+    def->init = unique_ptr<InitValAST>($4);
+    $$ = def;
+  }
+  ;
+
+ConstExp
+  : Exp { $$ = $1; }
+  ;
+
+VarDecl
+  : INT VarDefList ';' {
+    auto node = new VarDeclAST();
+    node->defs = std::move(*$2);
+    delete $2;
+    $$ = node;
+  }
+  ;
+
+VarDefList
+  : VarDefList ',' VarDef {
+    $1->push_back(std::move(*$3));
+    delete $3;
+    $$ = $1;
+  }
+  | VarDef {
+    auto vec = new std::vector<VarDef>();
+    vec->push_back(std::move(*$1));
+    delete $1;
+    $$ = vec;
+  }
+  ;
+
+VarDef
+  : IDENT ArrayDimListOpt {
+    auto def = new VarDef();
+    def->ident = *unique_ptr<string>($1);
+    for (auto *dim : *$2) {
+      def->dims.emplace_back(dim);
+    }
+    delete $2;
+    def->has_init = false;
+    $$ = def;
+  }
+  | IDENT ArrayDimListOpt '=' InitVal {
+    auto def = new VarDef();
+    def->ident = *unique_ptr<string>($1);
+    for (auto *dim : *$2) {
+      def->dims.emplace_back(dim);
+    }
+    delete $2;
+    def->init = unique_ptr<InitValAST>($4);
+    def->has_init = true;
+    $$ = def;
+  }
+  ;
+
+InitVal
+  : Exp {
+    auto node = new InitValAST();
+    node->is_expr = true;
+    node->expr = unique_ptr<ExprAST>($1);
+    $$ = node;
+  }
+  | '{' InitValListOpt '}' {
+    auto node = new InitValAST();
+    node->is_expr = false;
+    for (auto *it : *$2) {
+      node->list.emplace_back(it);
+    }
+    delete $2;
+    $$ = node;
+  }
+  ;
+
+InitValListOpt
+  : %empty {
+    $$ = new std::vector<InitValAST *>();
+  }
+  | InitValList {
+    $$ = $1;
+  }
+  ;
+
+InitValList
+  : InitVal {
+    auto vec = new std::vector<InitValAST *>();
+    vec->push_back($1);
+    $$ = vec;
+  }
+  | InitValList ',' InitVal {
+    $1->push_back($3);
+    $$ = $1;
+  }
+  ;
+
+Stmt
+  : LVal '=' Exp ';' {
+    auto node = new AssignStmtAST();
+    node->lval = unique_ptr<ExprAST>($1);
+    node->value = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | IF '(' Exp ')' Stmt %prec LOWER_THAN_ELSE {
+    auto node = new IfStmtAST();
+    node->cond = unique_ptr<ExprAST>($3);
+    node->then_stmt = unique_ptr<BaseAST>($5);
+    $$ = node;
+  }
+  | IF '(' Exp ')' Stmt ELSE Stmt {
+    auto node = new IfStmtAST();
+    node->cond = unique_ptr<ExprAST>($3);
+    node->then_stmt = unique_ptr<BaseAST>($5);
+    node->else_stmt = unique_ptr<BaseAST>($7);
+    $$ = node;
+  }
+  | WHILE '(' Exp ')' Stmt {
+    auto node = new WhileStmtAST();
+    node->cond = unique_ptr<ExprAST>($3);
+    node->body = unique_ptr<BaseAST>($5);
+    $$ = node;
+  }
+  | BREAK ';' {
+    $$ = new BreakStmtAST();
+  }
+  | CONTINUE ';' {
+    $$ = new ContinueStmtAST();
+  }
+  | Exp ';' {
+    auto node = new ExprStmtAST();
+    node->expr = unique_ptr<ExprAST>($1);
+    $$ = node;
+  }
+  | ';' {
+    $$ = new EmptyStmtAST();
+  }
+  | Block { $$ = $1; }
+  | RETURN Exp ';' {
+    auto node = new ReturnStmtAST();
+    node->value = unique_ptr<ExprAST>($2);
+    $$ = node;
+  }
+  | RETURN ';' {
+    auto node = new ReturnStmtAST();
+    $$ = node;
+  }
+  ;
+
+Exp
+  : LOrExp { $$ = $1; }
+  ;
+
+LOrExp
+  : LOrExp OR LAndExp {
+    auto node = new BinaryExpAST();
+    node->op = "||";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | LAndExp { $$ = $1; }
+  ;
+
+LAndExp
+  : LAndExp AND EqExp {
+    auto node = new BinaryExpAST();
+    node->op = "&&";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | EqExp { $$ = $1; }
+  ;
+
+EqExp
+  : EqExp EQ RelExp {
+    auto node = new BinaryExpAST();
+    node->op = "==";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | EqExp NE RelExp {
+    auto node = new BinaryExpAST();
+    node->op = "!=";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | RelExp { $$ = $1; }
+  ;
+
+RelExp
+  : RelExp '<' AddExp {
+    auto node = new BinaryExpAST();
+    node->op = "<";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | RelExp '>' AddExp {
+    auto node = new BinaryExpAST();
+    node->op = ">";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | RelExp LE AddExp {
+    auto node = new BinaryExpAST();
+    node->op = "<=";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | RelExp GE AddExp {
+    auto node = new BinaryExpAST();
+    node->op = ">=";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | AddExp { $$ = $1; }
+  ;
+
+AddExp
+  : AddExp '+' MulExp {
+    auto node = new BinaryExpAST();
+    node->op = "+";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | AddExp '-' MulExp {
+    auto node = new BinaryExpAST();
+    node->op = "-";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | MulExp { $$ = $1; }
+  ;
+
+MulExp
+  : MulExp '*' UnaryExp {
+    auto node = new BinaryExpAST();
+    node->op = "*";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | MulExp '/' UnaryExp {
+    auto node = new BinaryExpAST();
+    node->op = "/";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | MulExp '%' UnaryExp {
+    auto node = new BinaryExpAST();
+    node->op = "%";
+    node->lhs = unique_ptr<ExprAST>($1);
+    node->rhs = unique_ptr<ExprAST>($3);
+    $$ = node;
+  }
+  | UnaryExp { $$ = $1; }
+  ;
+
+UnaryExp
+  : PrimaryExp { $$ = $1; }
+  | UnaryOp UnaryExp {
+    auto node = new UnaryExpAST();
+    node->op = *unique_ptr<string>($1);
+    node->rhs = unique_ptr<ExprAST>($2);
+    $$ = node;
+  }
+  | IDENT '(' FuncRParamsOpt ')' {
+    auto node = new CallExpAST();
+    node->ident = *unique_ptr<string>($1);
+    for (auto *arg : *$3) {
+      node->args.emplace_back(arg);
+    }
+    delete $3;
+    $$ = node;
+  }
+  ;
+
+UnaryOp
+  : '+' { $$ = new string("+"); }
+  | '-' { $$ = new string("-"); }
+  | '!' { $$ = new string("!"); }
+  ;
+
+PrimaryExp
+  : '(' Exp ')' { $$ = $2; }
+  | LVal { $$ = $1; }
+  | Number { $$ = $1; }
+  ;
+
+LVal
+  : IDENT ArrayIndexListOpt {
+    auto node = new LValAST();
+    node->ident = *unique_ptr<string>($1);
+    for (auto *idx : *$2) {
+      node->indices.emplace_back(idx);
+    }
+    delete $2;
+    $$ = node;
+  }
+  ;
+
+ArrayIndexListOpt
+  : %empty {
+    $$ = new std::vector<ExprAST *>();
+  }
+  | ArrayIndexList {
+    $$ = $1;
+  }
+  ;
+
+ArrayIndexList
+  : ArrayIndexList '[' Exp ']' {
+    $1->push_back($3);
+    $$ = $1;
+  }
+  | '[' Exp ']' {
+    auto vec = new std::vector<ExprAST *>();
+    vec->push_back($2);
+    $$ = vec;
   }
   ;
 
 Number
   : INT_CONST {
+    auto node = new NumberAST();
+    node->value = $1;
+    $$ = node;
+  }
+  ;
+
+FuncRParamsOpt
+  : %empty {
+    $$ = new std::vector<ExprAST *>();
+  }
+  | FuncRParams {
+    $$ = $1;
+  }
+  ;
+
+FuncRParams
+  : Exp {
+    auto vec = new std::vector<ExprAST *>();
+    vec->push_back($1);
+    $$ = vec;
+  }
+  | FuncRParams ',' Exp {
+    $1->push_back($3);
     $$ = $1;
   }
   ;

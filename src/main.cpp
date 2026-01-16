@@ -39,7 +39,14 @@ int main(int argc, const char *argv[]) {
   // 输出解析得到的 AST, 其实就是个字符串
   freopen(output, "w", stdout);
 
-  ast->Dump();
+  if (mode == "-koopa") {
+    IRGenContext ctx;
+    ctx.out = &cout;
+    ast->Dump(ctx);
+  } else if (mode == "-riscv") {
+    RiscvContext ctx;
+    ast->EmitRiscv(ctx);
+  }
   cout << endl;
   return 0;
 }
